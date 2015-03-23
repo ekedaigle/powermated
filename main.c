@@ -7,6 +7,12 @@
 const int vendor_id = 0x077d;
 const int product_id = 0x0410;
 
+typedef struct {
+    IOHIDElementRef button;
+    IOHIDElementRef scroll;
+    IOHIDElementRef led;
+} PowerMateElements_t;
+
 // function to get a long device property
 
 // returns FALSE if the property isn't found or can't be converted to a long
@@ -29,6 +35,39 @@ static Boolean IOHIDDevice_GetLongProperty(
     return result;
 }   // IOHIDDevice_GetLongProperty
 
+static void DeviceAttached(void *inContext, IOReturn inResult, void *inSender,
+        IOHIDDeviceRef inIOHIDDeviceRef) {
+    printf("Device attached\n");
+}
+
+static void DeviceRemoved(void *inContext, IOReturn inResult, void *inSender,
+        IOHIDDeviceRef inIOHIDDeviceRef) {
+    printf("Device removed\n");
+}
+
+static void ValueAvailable(void *inContext, IOReturn inResult, void *inSender) {
+    IOHIDQueueRef queue = (IOHIDQueueRef)inSender;
+    PowerMateElements_t *elements = (PowerMateElements_t *)inContext;
+
+    do {
+        IOHIDValueRef value = IOHIDQueueCopyNextValueWithTimeout(queue, 0.0);
+        if (!value) break;
+
+        CFIndex int_value = IOHIDValueGetIntegerValue(value);
+        IOHIDElementRef element = IOHIDValueGetElement(value);
+
+        if (element == elements->button) {
+            printf("Button press: %ld\n", int_value);
+        } else if (element == elements->scroll) {
+            printf("Scroll: %ld\n", int_value);
+        } else {
+            printf("Unknown element\n");
+        }
+
+        CFRelease(value);
+    } while (true);
+}
+
 int main(int argc, const char *argv[]) {
 	// create a IO HID Manager reference
 	IOHIDManagerRef hid_manager = IOHIDManagerCreate( kCFAllocatorDefault, kIOHIDOptionsTypeNone );
@@ -50,6 +89,10 @@ int main(int argc, const char *argv[]) {
     IOHIDManagerSetDeviceMatching(hid_manager, match);
     CFRelease(match);
 
+    IOHIDManagerRegisterDeviceMatchingCallback(hid_manager, DeviceAttached, NULL);
+    IOHIDManagerRegisterDeviceRemovalCallback(hid_manager, DeviceRemoved, NULL);
+    IOHIDManagerScheduleWithRunLoop(hid_manager, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+
     if (IOHIDManagerOpen(hid_manager, kIOHIDOptionsTypeNone) != kIOReturnSuccess) {
         printf("Error opening HID manager\n");
         return 1;
@@ -58,7 +101,7 @@ int main(int argc, const char *argv[]) {
     CFSetRef devices = IOHIDManagerCopyDevices(hid_manager);
 
     if (!devices) {
-        printf("Error getting device set\n");
+        printf("No PowerMate devices found\n");
         return 1;
     }
 
@@ -68,33 +111,29 @@ int main(int argc, const char *argv[]) {
     IOHIDDeviceRef *device_refs = malloc(sizeof(IOHIDDeviceRef) * deviceCount);
     CFSetGetValues(devices, (const void **)device_refs);
 
-    for (CFIndex deviceIndex = 0; deviceIndex < deviceCount; deviceIndex++) {
-        IOHIDDeviceRef device = device_refs[deviceIndex];
-        CFArrayRef all_elements = IOHIDDeviceCopyMatchingElements(device, NULL, kIOHIDOptionsTypeNone);
-        CFIndex elementCount = CFArrayGetCount(all_elements);
+    IOHIDDeviceRef device = device_refs[0];
 
-        printf("Element count: %ld\n", elementCount);
-        CFIndex break_index = 1;
+    IOHIDQueueRef queue = IOHIDQueueCreate(kCFAllocatorDefault, device, 100, kIOHIDOptionsTypeNone);
 
-        for (CFIndex elementIndex = 0; elementIndex < elementCount; elementIndex++) {
-            IOHIDElementRef element = (IOHIDElementRef)CFArrayGetValueAtIndex(all_elements, elementIndex);
-            uint32_t usagePage = IOHIDElementGetUsagePage(element);
-            printf("Usage page: %u, ", usagePage);
+    CFArrayRef all_elements = IOHIDDeviceCopyMatchingElements(device, NULL, kIOHIDOptionsTypeNone);
+    CFIndex elementCount = CFArrayGetCount(all_elements);
 
-            IOHIDElementType element_type = IOHIDElementGetType(element);
-            printf("Element type: %d, ", element_type);
-
-            CFIndex min = IOHIDElementGetLogicalMin(element);
-            CFIndex max = IOHIDElementGetLogicalMax(element);
-            printf("Min: %ld, Max: %ld\n", min, max);
-
-            if (element_type == 257) {
-                IOHIDValueRef value_ref = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, element, 0, 0);
-                IOHIDDeviceSetValue(device, element, value_ref);
-                break;
-            }
-        }
+    if (elementCount < 9) {
+        printf("Too few elements found: %ld\n", elementCount);
+        return 1;
     }
+
+    PowerMateElements_t elements;
+    elements.button = (IOHIDElementRef)CFArrayGetValueAtIndex(all_elements, 1);
+    elements.scroll = (IOHIDElementRef)CFArrayGetValueAtIndex(all_elements, 2);
+    elements.led = (IOHIDElementRef)CFArrayGetValueAtIndex(all_elements, 8);
+
+    IOHIDQueueRegisterValueAvailableCallback(queue, ValueAvailable, &elements);
+    IOHIDQueueAddElement(queue, elements.button);
+    IOHIDQueueAddElement(queue, elements.scroll);
+    IOHIDQueueScheduleWithRunLoop(queue, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+    IOHIDQueueStart(queue);
+    CFRunLoopRun();
 
     return 0;
 }
